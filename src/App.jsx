@@ -89,40 +89,57 @@ function dateKey(d) {
 function todayKey()     { return dateKey(new Date()); }
 function yesterdayKey() { const d = new Date(); d.setDate(d.getDate()-1); return dateKey(d); }
 
+// Rango de días para la semana actual (W1=1-7, W2=8-14, etc.) del mes en curso
+function currentWeekRange() {
+  const weekNum = Math.ceil(new Date().getDate() / 7);
+  const start = (weekNum - 1) * 7 + 1;
+  const end   = weekNum * 7;
+  return { start, end };
+}
+// Rango del mes en curso
+function currentMonthRange() {
+  const now = new Date();
+  return { month: now.getMonth() + 1, year: now.getFullYear() };
+}
+
 function getConvForPeriod(byDate, tab) {
   const keys = Object.keys(byDate);
-  if (tab === 'hoy')   return byDate[todayKey()]     || {};
-  if (tab === 'ayer')  return byDate[yesterdayKey()] || {};
+  if (tab === 'hoy')  return byDate[todayKey()]     || {};
+  if (tab === 'ayer') return byDate[yesterdayKey()] || {};
+
   if (tab === 'semana') {
+    const { start, end } = currentWeekRange();
+    const { month, year } = currentMonthRange();
     const merged = {};
     keys.forEach(k => {
-      Object.entries(byDate[k] || {}).forEach(([id, v]) => {
-        merged[id] = (merged[id] || 0) + v;
-      });
-    });
-    // Filtra a los últimos 7 días
-    const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - 7);
-    const weekMerged = {};
-    keys.forEach(k => {
-      const [d,m,y] = k.split('/').map(Number);
-      const kd = new Date(y, m-1, d);
-      if (kd >= cutoff) {
+      const [d, m, y] = k.split('/').map(Number);
+      if (y === year && m === month && d >= start && d <= end) {
         Object.entries(byDate[k] || {}).forEach(([id, v]) => {
-          weekMerged[id] = (weekMerged[id] || 0) + v;
+          merged[id] = (merged[id] || 0) + v;
         });
       }
     });
-    return weekMerged;
+    return merged;
   }
-  // mes: todo
-  const all = {};
-  keys.forEach(k => {
-    Object.entries(byDate[k] || {}).forEach(([id, v]) => {
-      all[id] = (all[id] || 0) + v;
+
+  if (tab === 'mes') {
+    const { month, year } = currentMonthRange();
+    const merged = {};
+    keys.forEach(k => {
+      const [d, m, y] = k.split('/').map(Number);
+      if (y === year && m === month) {
+        Object.entries(byDate[k] || {}).forEach(([id, v]) => {
+          merged[id] = (merged[id] || 0) + v;
+        });
+      }
     });
-  });
-  return all;
+    return merged;
+  }
+
+  return {};
 }
+
+const sumObj = obj => Object.values(obj || {}).reduce((a, b) => a + b, 0);
 
 function parseVentasConsignas(ventasRows, consRows) {
   const week = getCurrentWeek();
@@ -176,55 +193,111 @@ function parseVentasConsignas(ventasRows, consRows) {
     return ALIAS_MAP[n] || null;
   }
 
-  // Ventas — columnas: SUCURSAL, Vendedor, COUNTA PPU y también Semana/COUNTA a la derecha
+  // ── Ventas: leer tabla izquierda (ejecutivos+mes) y tabla derecha (semanas) por separado
+  // Tabla izquierda: col 0=SUCURSAL, 1=Vendedor, 2=COUNTA PPU
+  // Tabla derecha:   col 5=Semana label (W1,W2..), 6=COUNTA PPU semana
+  // La tabla de semanas tiene sus propias filas independientes de la de ejecutivos
+
+  // 1) Acumular totales mensuales por ejecutivo (tabla izquierda)
   let curSuc = 'Santiago';
   ventasRows.forEach(row => {
-    const suc = (row[0] || '').trim();
+    const suc  = (row[0] || '').trim();
     const vend = (row[1] || '').trim();
-    const cnt = parseInt(row[2]) || 0;
-    const semLabel = (row[5] || '').trim(); // W1, W2...
-    const semCnt = parseInt(row[6]) || 0;
-
-    if (suc) curSuc = suc.includes('iña') ? 'Vina' : 'Santiago';
-    const id = resolveId(vend);
-    if (!id) return;
-
-    if (curSuc === 'Santiago') {
-      result.ventasStgoMes[id] = (result.ventasStgoMes[id] || 0) + cnt;
-      if (semLabel === week) result.ventasStgo[id] = (result.ventasStgo[id] || 0) + semCnt;
-    } else {
-      result.ventasVinaMes[id] = (result.ventasVinaMes[id] || 0) + cnt;
-      if (semLabel === week) result.ventasVina[id] = (result.ventasVina[id] || 0) + semCnt;
+    const cnt  = parseInt(row[2]) || 0;
+    if (suc && !suc.toLowerCase().includes('total') && !suc.toLowerCase().includes('suma')) {
+      curSuc = suc.includes('iña') ? 'Vina' : 'Santiago';
     }
+    const id = resolveId(vend);
+    if (!id || !cnt) return;
+    if (curSuc === 'Santiago') result.ventasStgoMes[id] = (result.ventasStgoMes[id] || 0) + cnt;
+    else                       result.ventasVinaMes[id] = (result.ventasVinaMes[id] || 0) + cnt;
   });
 
-  // Consignaciones
+  // 2) Leer tabla de semanas (tabla derecha de Ventas)
+  // Busca filas donde col5 o col6 tenga el label de semana y un número
+  // Estructura: fila header "Venta por Semana", luego "Semana, COUNTA", luego "W1, 9" etc.
+  // Como la tabla semanal es GLOBAL (total Santiago+Viña juntos en W1),
+  // repartimos proporcionalmente según los pesos mensuales por sucursal
+  let ventasSemTotal = 0;
+  ventasRows.forEach(row => {
+    const label = (row[5] || row[4] || '').trim();
+    const val   = parseInt(row[6] || row[5] || '') || 0;
+    if (label === week && val > 0) ventasSemTotal += val;
+  });
+
+  // Si no encontró en col5/6 busca en col6/7
+  if (ventasSemTotal === 0) {
+    ventasRows.forEach(row => {
+      const label = (row[6] || '').trim();
+      const val   = parseInt(row[7]) || 0;
+      if (label === week && val > 0) ventasSemTotal += val;
+    });
+  }
+
+  // Distribuir el total semanal entre ejecutivos proporcional al mes
+  const mesStgoTotal = sumObj(result.ventasStgoMes);
+  const mesVinaTotal = sumObj(result.ventasVinaMes);
+  const mesTotalVentas = mesStgoTotal + mesVinaTotal;
+
+  if (ventasSemTotal > 0 && mesTotalVentas > 0) {
+    Object.entries(result.ventasStgoMes).forEach(([id, v]) => {
+      result.ventasStgo[id] = Math.round(ventasSemTotal * (v / mesTotalVentas));
+    });
+    Object.entries(result.ventasVinaMes).forEach(([id, v]) => {
+      result.ventasVina[id] = Math.round(ventasSemTotal * (v / mesTotalVentas));
+    });
+  } else {
+    // Fallback: usar mensuales directamente
+    result.ventasStgo  = { ...result.ventasStgoMes };
+    result.ventasVina  = { ...result.ventasVinaMes };
+  }
+
+  // ── Consignaciones: misma lógica
   let curSuc2 = 'Santiago';
   consRows.forEach(row => {
-    const suc = (row[0] || '').trim();
+    const suc  = (row[0] || '').trim();
     const cons = (row[1] || '').trim();
-    const cnt = parseInt(row[2]) || 0;
-    const semLabel = (row[6] || '').trim();
-    const semCnt = parseInt(row[7]) || 0;
-
-    if (suc) curSuc2 = suc.includes('iña') ? 'Vina' : 'Santiago';
+    const cnt  = parseInt(row[2]) || 0;
+    if (suc && !suc.toLowerCase().includes('total') && !suc.toLowerCase().includes('suma')) {
+      curSuc2 = suc.includes('iña') ? 'Vina' : 'Santiago';
+    }
     const id = resolveId(cons);
-    if (!id) return;
+    if (!id || !cnt) return;
+    if (curSuc2 === 'Santiago') result.consStgoMes[id] = (result.consStgoMes[id] || 0) + cnt;
+    else                        result.consVinaMes[id] = (result.consVinaMes[id] || 0) + cnt;
+  });
 
-    if (curSuc2 === 'Santiago') {
-      result.consStgoMes[id] = (result.consStgoMes[id] || 0) + cnt;
-      if (semLabel === week) result.consStgo[id] = (result.consStgo[id] || 0) + semCnt;
-    } else {
-      result.consVinaMes[id] = (result.consVinaMes[id] || 0) + cnt;
-      if (semLabel === week) result.consVina[id] = (result.consVina[id] || 0) + semCnt;
+  // Leer total semanal de consignaciones
+  let consSemTotal = 0;
+  consRows.forEach(row => {
+    // Busca en distintas columnas posibles
+    for (let c = 4; c <= 8; c++) {
+      const label = (row[c] || '').trim();
+      const val   = parseInt(row[c+1]) || 0;
+      if (label === week && val > 0) { consSemTotal += val; break; }
     }
   });
+
+  const mesConsStgoTotal = sumObj(result.consStgoMes);
+  const mesConsVinaTotal = sumObj(result.consVinaMes);
+  const mesTotalCons = mesConsStgoTotal + mesConsVinaTotal;
+
+  if (consSemTotal > 0 && mesTotalCons > 0) {
+    Object.entries(result.consStgoMes).forEach(([id, v]) => {
+      result.consStgo[id] = Math.round(consSemTotal * (v / mesTotalCons));
+    });
+    Object.entries(result.consVinaMes).forEach(([id, v]) => {
+      result.consVina[id] = Math.round(consSemTotal * (v / mesTotalCons));
+    });
+  } else {
+    result.consStgo = { ...result.consStgoMes };
+    result.consVina = { ...result.consVinaMes };
+  }
 
   return result;
 }
 
 // ─── HELPERS ────────────────────────────────────────────────────────────────
-const sumObj = obj => Object.values(obj).reduce((a, b) => a + b, 0);
 const pct = (a, b) => b ? Math.round((a - b) / b * 100) : null;
 const metaSem = m => Math.round(m / 4);
 
@@ -237,101 +310,103 @@ function topExec(convData, group) {
   return best ? `${best} (${bestVal})` : '—';
 }
 
-// ─── STYLES (CSS-in-JS) ──────────────────────────────────────────────────────
+// ─── STYLES — optimizado para pantalla kiosk ─────────────────────────────────
 const S = {
   app: {
-    background: '#0a0d14',
+    background: '#070a10',
     minHeight: '100vh',
     fontFamily: "'DM Sans', sans-serif",
     color: '#e2e8f0',
-    padding: '16px 20px',
+    padding: '14px 18px',
   },
   topBar: {
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginBottom: 16,
+    marginBottom: 14,
   },
   logo: {
-    fontSize: 11,
-    fontWeight: 600,
-    letterSpacing: '3px',
+    fontSize: 12,
+    fontWeight: 700,
+    letterSpacing: '4px',
     color: '#3b82f6',
     textTransform: 'uppercase',
     fontFamily: "'DM Mono', monospace",
-    marginBottom: 3,
+    marginBottom: 4,
   },
   title: {
-    fontSize: 16,
-    fontWeight: 500,
-    color: '#f1f5f9',
+    fontSize: 20,
+    fontWeight: 600,
+    color: '#ffffff',
+    letterSpacing: '-0.3px',
   },
   rightBar: { display: 'flex', alignItems: 'center', gap: 12 },
   weekPill: {
     background: '#111827',
-    border: '1px solid #1e293b',
+    border: '1px solid #2d3748',
     borderRadius: 20,
-    padding: '5px 14px',
-    fontSize: 12,
-    color: '#64748b',
+    padding: '6px 16px',
+    fontSize: 13,
+    color: '#94a3b8',
     fontFamily: "'DM Mono', monospace",
   },
-  weekVal: { color: '#f59e0b', fontWeight: 600 },
-  tabs: { display: 'flex', gap: 3 },
+  weekVal: { color: '#fbbf24', fontWeight: 700 },
+  tabs: { display: 'flex', gap: 4 },
   tab: {
-    padding: '6px 14px',
+    padding: '7px 16px',
     borderRadius: 8,
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: 500,
     cursor: 'pointer',
     border: 'none',
     background: '#111827',
-    color: '#475569',
+    color: '#64748b',
     transition: 'all .15s',
   },
   tabActive: {
-    background: '#3b82f6',
+    background: '#2563eb',
     color: '#fff',
+    fontWeight: 600,
   },
   refreshTime: {
-    fontSize: 11,
-    color: '#334155',
+    fontSize: 12,
+    color: '#374151',
     fontFamily: "'DM Mono', monospace",
   },
   kpiRow: {
     display: 'grid',
     gridTemplateColumns: 'repeat(3, 1fr)',
     gap: 12,
-    marginBottom: 16,
+    marginBottom: 14,
   },
   kpi: {
-    background: '#0f1520',
-    border: '1px solid #1e293b',
-    borderRadius: 10,
-    padding: '14px 18px',
+    background: '#0d1117',
+    border: '1px solid #1e2d3d',
+    borderRadius: 12,
+    padding: '16px 20px',
   },
   kpiLabel: {
-    fontSize: 10,
-    color: '#475569',
-    letterSpacing: '1px',
+    fontSize: 11,
+    color: '#4b5563',
+    letterSpacing: '1.5px',
     textTransform: 'uppercase',
     fontFamily: "'DM Mono', monospace",
-    marginBottom: 8,
+    marginBottom: 10,
   },
   kpiVal: {
-    fontSize: 26,
-    fontWeight: 600,
-    color: '#f1f5f9',
+    fontSize: 40,
+    fontWeight: 700,
+    color: '#ffffff',
     lineHeight: 1,
-    marginBottom: 6,
+    marginBottom: 8,
   },
-  kpiSub: { fontSize: 12, marginTop: 2 },
+  kpiSub: { fontSize: 13, marginTop: 2 },
   sectionLabel: {
-    fontSize: 10,
+    fontSize: 11,
     fontWeight: 600,
-    color: '#334155',
+    color: '#374151',
     textTransform: 'uppercase',
-    letterSpacing: '1.5px',
+    letterSpacing: '2px',
     marginBottom: 10,
     fontFamily: "'DM Mono', monospace",
   },
@@ -341,8 +416,8 @@ const S = {
     gap: 12,
   },
   group: {
-    background: '#0f1520',
-    border: '1px solid #1e293b',
+    background: '#0d1117',
+    border: '1px solid #1e2d3d',
     borderRadius: 12,
     overflow: 'hidden',
   },
@@ -350,58 +425,60 @@ const S = {
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'space-between',
-    padding: '12px 16px',
-    borderBottom: '1px solid #1a2235',
+    padding: '14px 18px',
+    borderBottom: '1px solid #131c29',
   },
-  groupLeft: { display: 'flex', alignItems: 'center', gap: 8 },
-  groupName: { fontSize: 13, fontWeight: 600, color: '#f1f5f9' },
-  groupRight: { display: 'flex', alignItems: 'center', gap: 8 },
-  groupTotal: { fontSize: 22, fontWeight: 600, color: '#f1f5f9' },
+  groupLeft: { display: 'flex', alignItems: 'center', gap: 10 },
+  groupName: { fontSize: 15, fontWeight: 700, color: '#ffffff' },
+  groupRight: { display: 'flex', alignItems: 'center', gap: 10 },
+  groupTotal: { fontSize: 30, fontWeight: 700, color: '#ffffff' },
   progRow: {
     display: 'flex',
     alignItems: 'center',
-    gap: 10,
-    padding: '8px 16px 6px',
-    borderBottom: '1px solid #111827',
+    gap: 12,
+    padding: '10px 18px 8px',
+    borderBottom: '1px solid #0d1117',
   },
-  progLabel: { fontSize: 11, color: '#475569', width: 90, whiteSpace: 'nowrap' },
-  progBg: { flex: 1, height: 4, background: '#1e293b', borderRadius: 2, overflow: 'hidden' },
-  progFill: { height: 4, borderRadius: 2, transition: 'width .4s ease' },
+  progLabel: { fontSize: 12, color: '#4b5563', width: 95, whiteSpace: 'nowrap' },
+  progBg: { flex: 1, height: 6, background: '#1a2535', borderRadius: 3, overflow: 'hidden' },
+  progFill: { height: 6, borderRadius: 3, transition: 'width .4s ease' },
   progPct: {
-    fontSize: 11, color: '#64748b',
-    width: 34, textAlign: 'right',
+    fontSize: 12, color: '#6b7280',
+    width: 36, textAlign: 'right',
     fontFamily: "'DM Mono', monospace",
+    fontWeight: 600,
   },
   table: { width: '100%', borderCollapse: 'collapse' },
   th: {
-    fontSize: 10, color: '#334155', fontWeight: 500,
-    textAlign: 'left', padding: '6px 16px',
-    textTransform: 'uppercase', letterSpacing: '.5px',
+    fontSize: 11, color: '#374151', fontWeight: 600,
+    textAlign: 'left', padding: '8px 18px',
+    textTransform: 'uppercase', letterSpacing: '.8px',
     fontFamily: "'DM Mono', monospace",
+    borderBottom: '1px solid #131c29',
   },
   thR: { textAlign: 'right' },
   td: {
-    fontSize: 13, padding: '8px 16px',
-    borderTop: '1px solid #111827', color: '#94a3b8',
+    fontSize: 14, padding: '10px 18px',
+    borderTop: '1px solid #0f1620', color: '#9ca3af',
   },
   tdR: { textAlign: 'right' },
-  execName: { fontWeight: 500, color: '#e2e8f0' },
+  execName: { fontWeight: 600, color: '#e5e7eb', fontSize: 14 },
   badge: {
     display: 'inline-flex', alignItems: 'center',
-    padding: '2px 7px', borderRadius: 10,
-    fontSize: 11, fontWeight: 600, marginLeft: 4,
+    padding: '2px 8px', borderRadius: 10,
+    fontSize: 11, fontWeight: 700, marginLeft: 5,
   },
   varBadge: {
-    fontSize: 11, fontWeight: 600,
-    padding: '2px 8px', borderRadius: 20,
+    fontSize: 12, fontWeight: 700,
+    padding: '3px 10px', borderRadius: 20,
   },
   loading: {
     display: 'flex', alignItems: 'center', justifyContent: 'center',
-    height: '100vh', color: '#334155', fontSize: 14,
+    height: '100vh', color: '#374151', fontSize: 14,
     fontFamily: "'DM Mono', monospace", flexDirection: 'column', gap: 12,
   },
   spinner: {
-    width: 20, height: 20,
+    width: 24, height: 24,
     border: '2px solid #1e293b',
     borderTop: '2px solid #3b82f6',
     borderRadius: '50%',
@@ -410,7 +487,7 @@ const S = {
   errorBox: {
     background: '#1a0a0a', border: '1px solid #450a0a',
     borderRadius: 8, padding: '12px 16px',
-    color: '#ef4444', fontSize: 12, marginBottom: 16,
+    color: '#ef4444', fontSize: 13, marginBottom: 14,
     fontFamily: "'DM Mono', monospace",
   },
 };
