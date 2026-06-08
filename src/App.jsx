@@ -69,21 +69,25 @@ function parseConvData(rows) {
   const byDate = {};
   rows.slice(1).forEach(([fecha, execId, leads]) => {
     if (!fecha || !execId) return;
-    const key = fecha.trim();
+    const key = normDate(fecha.trim());
     if (!byDate[key]) byDate[key] = {};
     byDate[key][execId.trim()] = parseInt(leads) || 0;
   });
   return byDate;
 }
 
-function todayKey() {
-  const d = new Date();
+// Normaliza "6/06/2026" → "06/06/2026"
+function normDate(raw) {
+  if (!raw) return '';
+  const p = raw.trim().split('/');
+  if (p.length !== 3) return raw.trim();
+  return `${p[0].padStart(2,'0')}/${p[1].padStart(2,'0')}/${p[2]}`;
+}
+function dateKey(d) {
   return `${d.getDate().toString().padStart(2,'0')}/${(d.getMonth()+1).toString().padStart(2,'0')}/${d.getFullYear()}`;
 }
-function yesterdayKey() {
-  const d = new Date(); d.setDate(d.getDate() - 1);
-  return `${d.getDate().toString().padStart(2,'0')}/${(d.getMonth()+1).toString().padStart(2,'0')}/${d.getFullYear()}`;
-}
+function todayKey()     { return dateKey(new Date()); }
+function yesterdayKey() { const d = new Date(); d.setDate(d.getDate()-1); return dateKey(d); }
 
 function getConvForPeriod(byDate, tab) {
   const keys = Object.keys(byDate);
@@ -121,8 +125,6 @@ function getConvForPeriod(byDate, tab) {
 }
 
 function parseVentasConsignas(ventasRows, consRows) {
-  // Ventas hoja: SUCURSAL, Vendedor, COUNTA PPU, ..., Semana, COUNTA PPU
-  // Busca por semana actual
   const week = getCurrentWeek();
   const result = {
     ventasStgo:  {},
@@ -135,25 +137,43 @@ function parseVentasConsignas(ventasRows, consRows) {
     consVinaMes:   {},
   };
 
-  // Mapa nombre → ID para lookups
-  const nameToId = {};
-  Object.values(GROUPS).forEach(g => {
-    Object.entries(g.execs).forEach(([id, e]) => {
-      nameToId[e.nombre.toLowerCase()] = id;
-      // alias cortos
-      const parts = e.nombre.split(' ');
-      nameToId[(parts[0] + ' ' + (parts[1]?.[0]||'')+'.').toLowerCase()] = id;
-    });
-  });
+  // Mapa explícito de alias del Sheets → ID ejecutivo
+  const ALIAS_MAP = {
+    // Ventas Santiago
+    'pedro p.':    '11599928',
+    'pedro p':     '11599928',
+    'pedro pinto': '11599928',
+    'javier h.':   '8935167',
+    'javier h':    '8935167',
+    'javier herrera': '8935167',
+    // Ventas Viña
+    'victor t.':   '13188544',
+    'victor t':    '13188544',
+    'victor toledo': '13188544',
+    'tomas p.':    '13188552',
+    'tomas p':     '13188552',
+    'tomas paredes': '13188552',
+    // Consignas Santiago
+    'matias p.':   '13804760',
+    'matias p':    '13804760',
+    'matias peters': '13804760',
+    'francisca r.': '15277292',
+    'francisca r':  '15277292',
+    'francisca rodriguez': '15277292',
+    'francisca':   '15277292',
+    'tomas l.':    '14722736',
+    'tomas l':     '14722736',
+    'tomas leiva': '14722736',
+    // Consignas Viña
+    'yana n.':     '14268040',
+    'yana n':      '14268040',
+    'yana nava':   '14268040',
+  };
 
   function resolveId(rawName) {
     if (!rawName) return null;
-    const n = rawName.trim().toLowerCase();
-    if (nameToId[n]) return nameToId[n];
-    // fuzzy: primer nombre
-    const first = n.split(' ')[0];
-    const found = Object.keys(nameToId).find(k => k.startsWith(first));
-    return found ? nameToId[found] : null;
+    const n = rawName.trim().toLowerCase().replace(/\s+/g, ' ');
+    return ALIAS_MAP[n] || null;
   }
 
   // Ventas — columnas: SUCURSAL, Vendedor, COUNTA PPU y también Semana/COUNTA a la derecha
