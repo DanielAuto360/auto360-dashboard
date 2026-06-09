@@ -104,123 +104,70 @@ function resolveId(rawName, nameMap) {
   return found ? nameMap[found].id : null;
 }
 
-// ─── CONFIG PARSER ────────────────────────────────────────────────────────────
-// Estrategia: escanear TODAS las filas buscando patrones de nombre+número.
-// No dependemos de posición fija — detectamos la sección activa por el último
-// header que encontramos, tanto en el bloque izquierdo (cols A-C) como en el
-// derecho (cols F-H).
+// ─── CONFIG ESTÁTICO ─────────────────────────────────────────────────────────
+// Grupos, metas y ejecutivos hardcodeados según configuración real de Auto360.
+// IDs según hoja Ejecutivos. Metas según captura del Sheets (junio 2026).
 //
-// Metas conocidas (fallback garantizado si el Sheets falla):
-// Ventas Stgo:  Javier H. 19/5 | Pedro P. 19/5
-// Ventas Viña:  Victor T. 9/2  | Tomas P. 9/2
-// Cons Stgo:    Matias P. 18/5 | Tomas L. 18/5 | Francisca R. 18/5
-// Cons Viña:    Yana N. 25/6
+// Para actualizar metas: modificar los valores metaMensual / metaSemanal aquí.
+//
+// Ventas Stgo:  Javier H. (8935167)  19/5  | Pedro P. (11599928) 19/5
+// Ventas Viña:  Victor T. (13188544)  9/2  | Tomas P. (13188552)  9/2
+// Cons Stgo:    Matias P. (13804760) 18/5  | Tomas L. (14722736) 18/5 | Francisca R. (15277292) 18/5
+// Cons Viña:    Yana N.   (14268040) 25/6
 // Conv Ventas Stgo: Javier H. 238/59 | Pedro P. 238/59
 // Conv Ventas Viña: Victor T. 113/28 | Tomas P. 113/28
 // Conv Cons Stgo:   Matias P. 600/150 | Tomas L. 600/150 | Francisca R. 600/150
 // Conv Cons Viña:   Yana N. 600/150
 
-const FALLBACK_CONFIG = {
-  ventasStgo:     { 'Javier H.':  { metaMensual:19,  metaSemanal:5  }, 'Pedro P.':     { metaMensual:19,  metaSemanal:5  } },
-  ventasVina:     { 'Victor T.':  { metaMensual:9,   metaSemanal:2  }, 'Tomas P.':     { metaMensual:9,   metaSemanal:2  } },
-  consStgo:       { 'Matias P.':  { metaMensual:18,  metaSemanal:5  }, 'Tomas L.':     { metaMensual:18,  metaSemanal:5  }, 'Francisca R.': { metaMensual:18, metaSemanal:5 } },
-  consVina:       { 'Yana N.':    { metaMensual:25,  metaSemanal:6  } },
-  convVentasStgo: { 'Javier H.':  { metaMensual:238, metaSemanal:59 }, 'Pedro P.':     { metaMensual:238, metaSemanal:59 } },
-  convVentasVina: { 'Victor T.':  { metaMensual:113, metaSemanal:28 }, 'Tomas P.':     { metaMensual:113, metaSemanal:28 } },
-  convConsStgo:   { 'Matias P.':  { metaMensual:600, metaSemanal:150}, 'Tomas L.':     { metaMensual:600, metaSemanal:150}, 'Francisca R.': { metaMensual:600, metaSemanal:150} },
-  convConsVina:   { 'Yana N.':    { metaMensual:600, metaSemanal:150} },
-};
+function buildStaticConfig(nameMap) {
+  // Resuelve nombre → ID real desde la hoja Ejecutivos, con fallback al ID conocido
+  const rid = (nombre, fallbackId) => resolveId(nombre, nameMap) || fallbackId;
 
-function resolveFallbackWithIds(nameMap) {
-  // Convierte los nombres del fallback a IDs reales usando el nameMap
-  const result = {
-    ventasStgo:{}, ventasVina:{}, consStgo:{}, consVina:{},
-    convVentasStgo:{}, convVentasVina:{}, convConsStgo:{}, convConsVina:{},
+  const jH = rid('Javier H.',    '8935167');
+  const pP = rid('Pedro P.',     '11599928');
+  const vT = rid('Victor T.',    '13188544');
+  const tP = rid('Tomas P.',     '13188552');
+  const mP = rid('Matias P.',    '13804760');
+  const tL = rid('Tomas L.',     '14722736');
+  const fR = rid('Francisca R.', '15277292');
+  const yN = rid('Yana N.',      '14268040');
+
+  const nombre = id => Object.values(nameMap).find(x => x.id === id)?.nombre || id;
+
+  return {
+    ventasStgo: {
+      [jH]: { nombre: nombre(jH), metaMensual: 19, metaSemanal: 5 },
+      [pP]: { nombre: nombre(pP), metaMensual: 19, metaSemanal: 5 },
+    },
+    ventasVina: {
+      [vT]: { nombre: nombre(vT), metaMensual: 9,  metaSemanal: 2 },
+      [tP]: { nombre: nombre(tP), metaMensual: 9,  metaSemanal: 2 },
+    },
+    consStgo: {
+      [mP]: { nombre: nombre(mP), metaMensual: 18, metaSemanal: 5 },
+      [tL]: { nombre: nombre(tL), metaMensual: 18, metaSemanal: 5 },
+      [fR]: { nombre: nombre(fR), metaMensual: 18, metaSemanal: 5 },
+    },
+    consVina: {
+      [yN]: { nombre: nombre(yN), metaMensual: 25, metaSemanal: 6 },
+    },
+    convVentasStgo: {
+      [jH]: { metaMensual: 238, metaSemanal: 59 },
+      [pP]: { metaMensual: 238, metaSemanal: 59 },
+    },
+    convVentasVina: {
+      [vT]: { metaMensual: 113, metaSemanal: 28 },
+      [tP]: { metaMensual: 113, metaSemanal: 28 },
+    },
+    convConsStgo: {
+      [mP]: { metaMensual: 600, metaSemanal: 150 },
+      [tL]: { metaMensual: 600, metaSemanal: 150 },
+      [fR]: { metaMensual: 600, metaSemanal: 150 },
+    },
+    convConsVina: {
+      [yN]: { metaMensual: 600, metaSemanal: 150 },
+    },
   };
-  Object.entries(FALLBACK_CONFIG).forEach(([bucket, entries]) => {
-    Object.entries(entries).forEach(([nombre, metas]) => {
-      const id = resolveId(nombre, nameMap);
-      const nombreReal = Object.values(nameMap).find(x=>x.id===id)?.nombre || nombre;
-      if (id) result[bucket][id] = { nombre: nombreReal, ...metas };
-    });
-  });
-  return result;
-}
-
-function parseConfig(rows, nameMap) {
-  const result = {
-    ventasStgo:{}, ventasVina:{}, consStgo:{}, consVina:{},
-    convVentasStgo:{}, convVentasVina:{}, convConsStgo:{}, convConsVina:{},
-  };
-
-  // Estado del parser para bloque izquierdo (cols A=0,B=1,C=2) y derecho (F=5,G=6,H=7)
-  let leftSection  = null; // 'ventasStgo'|'ventasVina'|'convVentasStgo'|'convVentasVina'
-  let rightSection = null; // 'consStgo'|'consVina'|'convConsStgo'|'convConsVina'
-
-  const isHeaderCell = s => {
-    const n = normName(s);
-    return !s || n.includes('meta') || n.includes('total') || n.includes('suma') ||
-           n.includes('nombre') || n.includes('ejecutivo');
-  };
-
-  const detectSection = (cellText, isLeft) => {
-    const n = normName(cellText);
-    const isConv    = n.includes('conversacion');
-    const isVentas  = n.includes('venta');
-    const isConsign = n.includes('consign');
-    const isStgo    = n.includes('santiago') || (!n.includes('vi') && !n.includes('viña'));
-    const isVina    = n.includes('vi') || n.includes('viña');
-
-    if (isLeft) {
-      if (isConv && isVentas)  { leftSection  = isVina ? 'convVentasVina' : 'convVentasStgo'; return true; }
-      if (!isConv && isVentas) { leftSection  = isVina ? 'ventasVina'     : 'ventasStgo';     return true; }
-    } else {
-      if (isConv && isConsign) { rightSection = isVina ? 'convConsVina'   : 'convConsStgo';   return true; }
-      if (!isConv && isConsign){ rightSection = isVina ? 'consVina'       : 'consStgo';        return true; }
-    }
-    return false;
-  };
-
-  rows.forEach(row => {
-    const a = (row[0]||'').trim(), b = (row[1]||'').toString().trim(), c = (row[2]||'').toString().trim();
-    const f = (row[5]||'').trim(), g = (row[6]||'').toString().trim(), h = (row[7]||'').toString().trim();
-
-    // Detectar headers de sección
-    if (a) detectSection(a, true);
-    if (f) detectSection(f, false);
-
-    // Bloque izquierdo: si A es un nombre ejecutivo (no header), leer B y C
-    if (leftSection && a && !isHeaderCell(a)) {
-      const id  = resolveId(a, nameMap);
-      const mes = parseInt(b) || 0;
-      const sem = parseInt(c) || 0;
-      if (id && (mes > 0 || sem > 0)) {
-        const nombre = Object.values(nameMap).find(x=>x.id===id)?.nombre || a;
-        result[leftSection][id] = { nombre, metaMensual: mes, metaSemanal: sem };
-      }
-    }
-
-    // Bloque derecho: si F es un nombre ejecutivo (no header), leer G y H
-    if (rightSection && f && !isHeaderCell(f)) {
-      const id  = resolveId(f, nameMap);
-      const mes = parseInt(g) || 0;
-      const sem = parseInt(h) || 0;
-      if (id && (mes > 0 || sem > 0)) {
-        const nombre = Object.values(nameMap).find(x=>x.id===id)?.nombre || f;
-        result[rightSection][id] = { nombre, metaMensual: mes, metaSemanal: sem };
-      }
-    }
-  });
-
-  // Verificar qué secciones quedaron vacías y completar con fallback
-  const fallback = resolveFallbackWithIds(nameMap);
-  Object.keys(result).forEach(bucket => {
-    if (Object.keys(result[bucket]).length === 0) {
-      result[bucket] = fallback[bucket];
-    }
-  });
-
-  return result;
 }
 
 // ─── CONVERSACIONES PARSER ────────────────────────────────────────────────────
@@ -343,15 +290,14 @@ function parseDataCompleta(rows, nameMap) {
 
 // ─── FETCH PRINCIPAL ──────────────────────────────────────────────────────────
 async function fetchAll() {
-  const [execRows, convRows, dataRows, configRows] = await Promise.all([
+  const [execRows, convRows, dataRows] = await Promise.all([
     fetchSheet('Ejecutivos!A:B'),
     fetchSheet('Dashboard Data - Mensajes!A:C'),
-    fetchSheet('Data_Completa!A:AN'),   // columna AN = índice 39
-    fetchSheet('Config!A:H'),
+    fetchSheet('Data_Completa!A:AN'),
   ]);
   const nameMap  = buildNameMap(execRows);
   const convData = parseConv(convRows);
-  const config   = parseConfig(configRows, nameMap);
+  const config   = buildStaticConfig(nameMap);
   const { ventas, cons } = parseDataCompleta(dataRows, nameMap);
   return { nameMap, convData, config, ventas, cons };
 }
