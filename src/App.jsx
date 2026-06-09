@@ -8,7 +8,38 @@ const REFRESH_MS = 5 * 60 * 1000;
 const sumObj = obj => Object.values(obj || {}).reduce((a, b) => a + b, 0);
 const pct    = (a, b) => (b ? Math.round((a - b) / b * 100) : null);
 
-function getCurrentWeek() { return 'W' + Math.ceil(new Date().getDate() / 7); }
+// ─── WEEK UTILS (semanas reales del mes calendario) ───────────────────────────
+// W1=1-7, W2=8-14, W3=15-21, W4=22-28, W5=29-31 (si el mes tiene esos días)
+function getWeekRangesForMonth(year, month) {
+  const daysInMonth = new Date(year, month, 0).getDate();
+  const ranges = [
+    { w: 'W1', start: 1,  end: 7  },
+    { w: 'W2', start: 8,  end: 14 },
+    { w: 'W3', start: 15, end: 21 },
+    { w: 'W4', start: 22, end: 28 },
+  ];
+  if (daysInMonth > 28) ranges.push({ w: 'W5', start: 29, end: daysInMonth });
+  return ranges;
+}
+
+function getWeekForDay(day, year, month) {
+  const ranges = getWeekRangesForMonth(year, month);
+  const r = ranges.find(r => day >= r.start && day <= r.end);
+  return r ? r.w : null;
+}
+
+function getCurrentWeek() {
+  const n = new Date();
+  return getWeekForDay(n.getDate(), n.getFullYear(), n.getMonth() + 1) || 'W1';
+}
+
+function currentWeekRange() {
+  const n = new Date();
+  const ranges = getWeekRangesForMonth(n.getFullYear(), n.getMonth() + 1);
+  const r = ranges.find(r => n.getDate() >= r.start && n.getDate() <= r.end);
+  return r ? { start: r.start, end: r.end } : { start: 1, end: 7 };
+}
+
 function dateKey(d) {
   return `${d.getDate().toString().padStart(2,'0')}/${(d.getMonth()+1).toString().padStart(2,'0')}/${d.getFullYear()}`;
 }
@@ -21,7 +52,17 @@ function normDate(raw) {
   return `${p[0].padStart(2,'0')}/${p[1].padStart(2,'0')}/${p[2]}`;
 }
 function currentMonthYear() { const n = new Date(); return { month: n.getMonth()+1, year: n.getFullYear() }; }
-function currentWeekRange() { const w = Math.ceil(new Date().getDate()/7); return { start:(w-1)*7+1, end:w*7 }; }
+
+// Parsea fecha dd/mm/yyyy o dd-mm-yyyy → { day, month, year } o null
+function parseDate(raw) {
+  if (!raw) return null;
+  const s = raw.trim().replace(/-/g, '/');
+  const p = s.split('/');
+  if (p.length !== 3) return null;
+  const day = parseInt(p[0]), month = parseInt(p[1]), year = parseInt(p[2]);
+  if (!day || !month || !year) return null;
+  return { day, month, year };
+}
 
 // ─── SHEETS FETCH ─────────────────────────────────────────────────────────────
 async function fetchSheet(range) {
@@ -222,54 +263,96 @@ function getConvForPeriod(byDate, tab) {
   return merged;
 }
 
-// ─── VENTAS/CONSIGNAS PARSER ──────────────────────────────────────────────────
-function parseResultados(rows, nameMap, week) {
-  const mes = {};
-  // Mensual: col B (índice 1) tiene el nombre, col C (índice 2) tiene COUNTA
-  rows.forEach(row => {
-    const nombre = (row[1]||'').trim();
-    const cnt    = parseInt(row[2]) || 0;
-    const id     = resolveId(nombre, nameMap);
-    if (!id || !cnt) return;
-    mes[id] = (mes[id]||0) + cnt;
-  });
+// ─── DATA_COMPLETA PARSER ─────────────────────────────────────────────────────
+// Columnas (0-indexed): A=0 patente, B=1 estado, C=2 fechaIngreso,
+//   P=15 sucursal, AC=28 consignador, AH=33 fechaVenta, AN=39 vendedor
+const COL = { estado:1, fechaIngreso:2, sucursal:15, consignador:28, fechaVenta:33, vendedor:39 };
 
-  // Semanal: busca el label W2 en columnas 4-8
-  let semTotal = 0;
-  rows.forEach(row => {
-    for (let c=4; c<=7; c++) {
-      const label = (row[c]||'').trim();
-      const val   = parseInt(row[c+1]||'') || 0;
-      if (label===week && val>0) { semTotal += val; break; }
+function normSucursal(raw) {
+  const s = (raw||'').trim().toLowerCase();
+  if (s.includes('vi') || s.includes('ña') || s.includes('vina')) return 'vina';
+  return 'stgo'; // default Santiago
+}
+
+function isCurrentMonth(pd) {
+  if (!pd) return false;
+  const { month, year } = currentMonthYear();
+  return pd.month === month && pd.year === year;
+}
+
+function parseDataCompleta(rows, nameMap) {
+  const { month, year } = currentMonthYear();
+  const weekRanges = getWeekRangesForMonth(year, month);
+
+  // Acumuladores: { [execId]: { mes: N, semana: N } }
+  const ventas = {};
+  const cons   = {};
+
+  const initExec = (map, id) => {
+    if (!map[id]) map[id] = { mes: 0, semana: 0 };
+  };
+
+  const currentWeekLabel = getCurrentWeek();
+
+  rows.slice(1).forEach(row => {
+    const estado      = (row[COL.estado]       || '').trim().toLowerCase();
+    const sucursalRaw = (row[COL.sucursal]      || '').trim();
+    const vendedorRaw = (row[COL.vendedor]      || '').trim();
+    const consigRaw   = (row[COL.consignador]   || '').trim();
+    const fechaVentaR = (row[COL.fechaVenta]    || '').trim();
+    const fechaIngrR  = (row[COL.fechaIngreso]  || '').trim();
+
+    const sucursal = normSucursal(sucursalRaw);
+
+    // ── VENTAS: estado contiene "vendido" + tiene fecha de venta en el mes actual ──
+    if (estado === 'vendido' || estado.includes('vendido')) {
+      const fv = parseDate(fechaVentaR);
+      if (fv && isCurrentMonth(fv)) {
+        const id = resolveId(vendedorRaw, nameMap);
+        if (id) {
+          initExec(ventas, id);
+          ventas[id].mes++;
+          const w = getWeekForDay(fv.day, fv.year, fv.month);
+          if (w === currentWeekLabel) ventas[id].semana++;
+        }
+      }
+    }
+
+    // ── CONSIGNAS: tiene consignador + fecha de ingreso en el mes actual ──
+    if (consigRaw) {
+      const fi = parseDate(fechaIngrR);
+      if (fi && isCurrentMonth(fi)) {
+        const id = resolveId(consigRaw, nameMap);
+        if (id) {
+          initExec(cons, id);
+          cons[id].mes++;
+          const w = getWeekForDay(fi.day, fi.year, fi.month);
+          if (w === currentWeekLabel) cons[id].semana++;
+        }
+      }
     }
   });
 
-  // Distribuir semanal proporcional al mensual
-  const semana = {};
-  const mesTotal = sumObj(mes);
-  if (semTotal>0 && mesTotal>0) {
-    Object.entries(mes).forEach(([id,v]) => { semana[id]=Math.round(semTotal*(v/mesTotal)); });
-  } else {
-    Object.assign(semana, mes);
-  }
-  return { semana, mes };
+  // Convertir a formato { mes: {id:N}, semana: {id:N} }
+  const toFlat = (map, key) => Object.fromEntries(Object.entries(map).map(([id,v])=>[id,v[key]]));
+  return {
+    ventas: { mes: toFlat(ventas,'mes'), semana: toFlat(ventas,'semana') },
+    cons:   { mes: toFlat(cons,  'mes'), semana: toFlat(cons,  'semana') },
+  };
 }
 
 // ─── FETCH PRINCIPAL ──────────────────────────────────────────────────────────
 async function fetchAll() {
-  const [execRows, convRows, ventasRows, consRows, configRows] = await Promise.all([
+  const [execRows, convRows, dataRows, configRows] = await Promise.all([
     fetchSheet('Ejecutivos!A:B'),
     fetchSheet('Dashboard Data - Mensajes!A:C'),
-    fetchSheet('Ventas!A:H'),
-    fetchSheet('Consignaciones!A:H'),
+    fetchSheet('Data_Completa!A:AN'),   // columna AN = índice 39
     fetchSheet('Config!A:H'),
   ]);
   const nameMap  = buildNameMap(execRows);
   const convData = parseConv(convRows);
-  const week     = getCurrentWeek();
   const config   = parseConfig(configRows, nameMap);
-  const ventas   = parseResultados(ventasRows, nameMap, week);
-  const cons     = parseResultados(consRows,   nameMap, week);
+  const { ventas, cons } = parseDataCompleta(dataRows, nameMap);
   return { nameMap, convData, config, ventas, cons };
 }
 
